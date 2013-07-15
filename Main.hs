@@ -3,7 +3,7 @@
 import Prelude hiding                   (catch)
 
 import Control.Applicative              ((<$>), (<*>), (<*))
-import Control.Concurrent               (forkIO)
+import Control.Conditional              (ifM)
 import Control.Exception                (IOException, catch, evaluate)
 import Control.Monad                    (MonadPlus, mzero, forever, void,
                                          when, unless, liftM)
@@ -23,13 +23,14 @@ import Data.Maybe                       (maybe)
 import Data.Text                        ()
 import Network.HTTP                     (simpleHTTP, getRequest,
                                          getResponseBody)
+import System.Directory                 (doesFileExist)
 import System.Environment               (getArgs)
 import System.Exit                      (exitFailure)
 import System.IO                        (Handle, BufferMode(LineBuffering),
-                                         hSetBuffering, hPutStr, hPutStrLn,
-                                         hClose, hGetLine, withFile,
-                                         hGetContents, IOMode(ReadMode),
-                                         stderr)
+                                         FilePath, hSetBuffering, hPutStr,
+                                         hPutStrLn, hClose, hGetLine,
+                                         withFile, writeFile, hGetContents,
+                                         IOMode(ReadMode), stderr)
 
 import qualified Data.ByteString
 import qualified Data.Map               as M
@@ -39,56 +40,73 @@ import qualified Network.IRC.Base       as IB
 import qualified Network.IRC.Commands   as IC
 import qualified Network.IRC.Parser     as IP
 import qualified Text.Regex.PCRE.Light  as RE
-import qualified System.Directory       as D
 
 
 type LastFMUserName = String
+type LastFMAPIKey   = String
+type ChannelName    = String
 
 
 
-data BotState = BotState {
-                  botHandle       :: Handle,
-                  nick2LastFMMap  :: Map IB.UserName LastFMUserName,
-                  curRespondent   :: Maybe String
-                }
+data BotState = BotState { botHandle       :: Handle
+                         , nick2LastFMMap  :: Map IB.UserName LastFMUserName
+                         , curRespondent   :: Maybe String
+                         }
 
-data BotConfig = BotConfig {
-                   botServer :: N.HostName
-                 , botPort   :: N.PortID
-                 , botNick   :: IB.UserName
-                 }
+data BotConfig = BotConfig { botNick        :: IB.UserName
+                           , botChannel     :: ChannelName
+                           , serverHost     :: N.HostName
+                           , serverPort     :: N.PortID
+                           , accountMapFile :: FilePath
+                           , lastfmApiKey   :: LastFMAPIKey
+                           }
 
 
 type App = ReaderT BotConfig (StateT BotState IO)
 
-
-
 main :: IO ()
 main = N.withSocketsDo $ do
-    conf   <- readConf
+    conf   <- confFromArgs
 
-    handle <- N.connectTo (botServer conf) (botPort conf)
+    handle <- N.connectTo (serverHost conf) (serverPort conf)
     hSetBuffering handle LineBuffering
 
-    let startState = BotState handle M.empty Nothing
+    startState <- mkStartState conf handle
     void $ runStateT (runReaderT runBot conf) startState
 
-
-readConf :: IO BotConfig
-readConf = getArgs >>= build
+confFromArgs :: IO BotConfig
+confFromArgs = getArgs >>= build
   where
-    build [botNick, ircServer, ircPort, apiKey] | all isDigit ircPort =
-      return $ BotConfig ircServer (N.PortNumber 6667) botNick
-
+    build [bn, bc, sh, sp, amf, apiKey] | all isDigit sp =
+      return BotConfig { botNick        = bn
+                       , botChannel     = bc
+                       , serverHost     = sh
+                       , serverPort     = N.PortNumber $ fromIntegral $ read sp
+                       , accountMapFile = amf
+                       , lastfmApiKey   = apiKey
+                       }
     build _ =
-      do printError ("arguments: <bot nick> <server> " ++
-                     "<port> <last.fm api key>")
+      do printError (
+           "args: <bot nick> <channel> <server host> <server port> " ++
+                 "<account mapping file> <last.fm api key>")
          exitFailure
 
+mkStartState :: BotConfig -> Handle -> IO BotState
+mkStartState conf h = do m      <- getMap
+                         return $ BotState h m Nothing
+  where
+    getMap =
+      ifM (doesFileExist $ accountMapFile conf)
+          (do rawEntries <- lines <$> (readFile $ accountMapFile conf)
+              let entries = M.fromList [(a, b) | [a, b] <- map words rawEntries]
+              putStrLn $ "Read " ++ show (M.size entries) ++
+                           " entries from disk"
+              return entries)
+          (return M.empty)
 
 runBot :: App ()
 runBot = do registerBot
-            joinChannels
+            joinChannel
             forever act
 
 registerBot :: App ()
@@ -96,8 +114,8 @@ registerBot = do nick    <- getBotNick
                  ircSend $ IC.nick nick
                  ircSend $ IC.user nick "x" "y" nick
 
-joinChannels :: App ()
-joinChannels = ircSend $ IC.joinChan "#wtflulz"
+joinChannel :: App ()
+joinChannel = getBotChannel >>= ircSend . IC.joinChan
 
 act :: App ()
 act = readMsg >>= \m -> withMaybe m
@@ -110,16 +128,18 @@ readMsg = do h <- getBotHandle
 
 actOnMessage :: IB.Message -> App ()
 actOnMessage m = do whenDebugLog $ "acting on " ++ show m
-                    withMaybe (M.lookup (IB.msg_command m) handlers)
-                              (\h -> h m)
-                              ("no handler for " ++ show m)
-
+                    maybe (return ())
+                          (\h -> h m)
+                          (M.lookup (IB.msg_command m) handlers)
 
 type CommandHandler = IB.Message -> App ()
+
+nullHandler m = return ()
 
 handlers :: Map IB.Command CommandHandler
 handlers = M.fromList [("PING",    onPing  )
                       ,("PRIVMSG", onPrivMsg)
+                      ,("NOTICE",  nullHandler)
                       ]
 
 onPing :: CommandHandler
@@ -145,6 +165,14 @@ fmRegister ircNick lastfmName =
     addRegistration ircNick lastfmName
     ircRespond $ "registered last.fm account " ++ lastfmName ++
                  " for user " ++ ircNick ++ "."
+    saveMappingFile
+
+saveMappingFile :: App ()
+saveMappingFile = do
+  m <- nick2LastFMMap <$> get
+  f <- getAccountMapFile
+  let serialized = concatMap (\(a, b) -> a++" "++b++"\n") (M.toList m)
+  liftIO $ writeFile f serialized
 
 addRegistration :: IB.UserName -> LastFMUserName -> App ()
 addRegistration ircNick lastfmName = do
@@ -173,7 +201,8 @@ fmLookup ircNick =
                         "(register with \"!fm register <account-name>\".)"
 
        Just lastfmName -> do
-           body   <- pack <$> fetchUrl (urlForAccount lastfmName)
+           url    <- urlForAccount lastfmName
+           body   <- pack <$> fetchUrl url
            liftIO $ print body
            withMaybe (fmParse body)
                      (\(artistName, trackName) ->
@@ -182,15 +211,16 @@ fmLookup ircNick =
                      ("failed to fetch current track for " ++ lastfmName)
 
 
-urlForAccount :: LastFMUserName -> String
-urlForAccount lastfmName = concat
-  ["http://ws.audioscrobbler.com/2.0/"
-  ,"?method=user.getrecenttracks"
-  ,"&user=", lastfmName
-  ,"&api_key=111d673f9cec7d41d15920bb4e250ba5"
-  ,"&format=json"
-  ,"&limit=1"
-  ]
+urlForAccount :: LastFMUserName -> App String
+urlForAccount lastfmName = do
+  apiKey <- getApiKey
+  return $ concat ["http://ws.audioscrobbler.com/2.0/"
+                  ,"?method=user.getrecenttracks"
+                  ,"&user=", lastfmName
+                  ,"&api_key=", apiKey
+                  ,"&format=json"
+                  ,"&limit=1"
+                  ]
 
 fmParse :: ByteString -> Maybe (String, String)
 fmParse body =
@@ -212,13 +242,13 @@ ircSend m = do h            <- getBotHandle
                whenDebugLog $ "sent " ++ (show m)
 
 whenDebugLog :: String -> App ()
-whenDebugLog = printError
+whenDebugLog x = return () -- printError
 
-getBotHandle :: App Handle
-getBotHandle = botHandle <$> get
-
-getBotNick :: App String
-getBotNick = botNick <$> ask
+getApiKey         = lastfmApiKey   <$> ask :: App LastFMAPIKey
+getBotChannel     = botChannel     <$> ask :: App ChannelName
+getBotHandle      = botHandle      <$> get :: App Handle
+getBotNick        = botNick        <$> ask :: App IB.UserName
+getAccountMapFile = accountMapFile <$> ask :: App FilePath
 
 printError :: MonadIO m => String -> m ()
 printError = liftIO . hPutStrLn stderr
