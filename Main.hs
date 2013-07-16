@@ -33,7 +33,6 @@ import qualified Text.Regex.PCRE.Light  as RE
 
 type App = ReaderT BotConf (StateT BotState IO)
 
-
 main :: IO ()
 main = N.withSocketsDo $ do
     conf   <- confFromArgs
@@ -142,13 +141,6 @@ respond msg = do mcr <- getCurRespondent
                            (\r -> sendMsg $ IC.privmsg r msg)
                            "no current respondent registered"
 
-setCurRespondent :: String -> String -> App ()
-setCurRespondent nick target =
-  modify $ \s ->
-    s { curRespondent = Just $ if head target == '#'
-                               then target
-                               else nick }
-
 
 --         --
 -- LAST.FM --
@@ -244,14 +236,21 @@ data BotState = BotState { botHandle       :: Handle
                          , curRespondent   :: Maybe IB.UserName
                          }
 getBotHandle             :: App Handle
-getBotHandle             = botHandle      <$> get
+getBotHandle             = botHandle <$> get
 getCurRespondent         :: App (Maybe IB.UserName)
-getCurRespondent         = curRespondent  <$> get
+getCurRespondent         = curRespondent <$> get
 getNick2LastFMMap        :: App AccountMap
 getNick2LastFMMap        = nick2LastFMMap <$> get
-modifyNick2LastFmMap     :: (AccountMap -> AccountMap) -> App ()
-modifyNick2LastFmMap f   = do m <- getNick2LastFMMap
-                              modify $ \s -> s { nick2LastFMMap = f m }
+
+setCurRespondent :: String -> String -> App ()
+setCurRespondent nick target = modify $ \s ->
+  s { curRespondent = Just $ if head target == '#'
+                             then target
+                             else nick }
+
+modifyNick2LastFmMap :: (AccountMap -> AccountMap) -> App ()
+modifyNick2LastFmMap f = do m <- getNick2LastFMMap
+                            modify $ \s -> s { nick2LastFMMap = f m }
 
 data BotConf = BotConf { botNick        :: IB.UserName
                        , botChannel     :: ChannelName
