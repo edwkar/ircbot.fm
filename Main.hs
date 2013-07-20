@@ -3,7 +3,7 @@
 
 import Control.Applicative              ((<$>))
 import Control.Conditional              (ifM)
-import Control.Monad                    (forever, void)
+import Control.Monad                    (forever, void, forM_)
 import Control.Monad.IO.Class           (MonadIO, liftIO)
 import Control.Monad.Reader             (ReaderT, runReaderT, ask)
 import Control.Monad.State              (StateT, runStateT, get, modify)
@@ -11,6 +11,7 @@ import Data.ByteString                  (ByteString)
 import Data.ByteString.Char8            (pack)
 import Data.ByteString.UTF8             (toString)
 import Data.Char                        (isDigit)
+import Data.List.Split                  (splitOn)
 import Data.Map                         (Map)
 import Network.HTTP                     (simpleHTTP, getRequest,
                                          getResponseBody)
@@ -50,7 +51,7 @@ confFromArgs = getArgs >>= build
     build [bn, bc, sh, sp, amf, apiKey] | all isDigit sp =
       return BotConf
          { botNick        = bn
-         , botChannel     = bc
+         , botChannels    = splitOn "," bc
          , serverHost     = sh
          , serverPort     = N.PortNumber $ fromIntegral (read sp :: Integer)
          , accountMapFile = amf
@@ -59,8 +60,8 @@ confFromArgs = getArgs >>= build
 
     build _ =
       do printError (
-           "args: <bot nick> <channel> <server host> <server port> " ++
-                 "<account mapping file> <last.fm api key>")
+           "args: <bot nick> <channel0,channel1,...> <server host> " ++
+                 "<server port> <account mapping file> <last.fm api key>")
          exitFailure
 
 mkStartState :: BotConf -> Handle -> IO BotState
@@ -83,7 +84,7 @@ mkStartState conf h = do m <- getMap
 
 runBot :: App ()
 runBot = do registerBot
-            joinChannel
+            joinChannels
             forever act
 
 registerBot :: App ()
@@ -91,8 +92,8 @@ registerBot = do nick    <- getBotNick
                  sendMsg $ IC.nick nick
                  sendMsg $ IC.user nick "x" "y" nick
 
-joinChannel :: App ()
-joinChannel = getBotChannel >>= sendMsg . IC.joinChan
+joinChannels :: App ()
+joinChannels = getBotChannels >>= \bc -> forM_ bc (sendMsg . IC.joinChan)
 
 act :: App ()
 act = do m <- readMsg
@@ -254,7 +255,7 @@ modifyNick2LastFmMap f   = do m <- getNick2LastFMMap
                               modify $ \s -> s { nick2LastFMMap = f m }
 
 data BotConf = BotConf { botNick        :: IB.UserName
-                       , botChannel     :: ChannelName
+                       , botChannels    :: [ChannelName]
                        , serverHost     :: N.HostName
                        , serverPort     :: N.PortID
                        , accountMapFile :: FilePath
@@ -262,8 +263,8 @@ data BotConf = BotConf { botNick        :: IB.UserName
                        }
 getBotNick             :: App IB.UserName
 getBotNick             = botNick        <$> ask
-getBotChannel          :: App ChannelName
-getBotChannel          = botChannel     <$> ask
+getBotChannels         :: App [ChannelName]
+getBotChannels         = botChannels    <$> ask
 getAccountMapFile      :: App FilePath
 getAccountMapFile      = accountMapFile <$> ask
 getApiKey              :: App LastFMAPIKey
