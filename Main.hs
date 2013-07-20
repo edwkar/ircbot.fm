@@ -3,7 +3,7 @@
 
 import Control.Applicative              ((<$>))
 import Control.Conditional              (ifM)
-import Control.Monad                    (forever, void, forM_)
+import Control.Monad                    (forever, void)
 import Control.Monad.IO.Class           (MonadIO, liftIO)
 import Control.Monad.Reader             (ReaderT, runReaderT, ask)
 import Control.Monad.State              (StateT, runStateT, get, modify)
@@ -92,7 +92,7 @@ registerBot = do nick    <- getBotNick
                  sendMsg $  IC.user nick "x" "y" nick
 
 joinChannels :: App ()
-joinChannels = getBotChannels >>= \bc -> forM_ bc (sendMsg . IC.joinChan)
+joinChannels = getBotChannels >>= mapM_ (sendMsg . IC.joinChan)
 
 act :: App ()
 act = do m <- readMsg
