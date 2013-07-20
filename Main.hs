@@ -34,12 +34,11 @@ import qualified Text.Regex.PCRE.Light  as RE
 
 type App = ReaderT BotConf (StateT BotState IO)
 
-
 main :: IO ()
 main = N.withSocketsDo $ do
-    conf   <- confFromArgs
+    conf       <- confFromArgs
 
-    handle <- N.connectTo (serverHost conf) (serverPort conf)
+    handle     <- N.connectTo (serverHost conf) (serverPort conf)
     hSetBuffering handle LineBuffering
 
     startState <- mkStartState conf handle
@@ -68,14 +67,14 @@ mkStartState :: BotConf -> Handle -> IO BotState
 mkStartState conf h = do m <- getMap
                          return $ BotState h m Nothing
   where
-    getMap =
-      ifM (doesFileExist $ accountMapFile conf)
-          (do rawEntries <- lines <$> readFile (accountMapFile conf)
-              let entries = M.fromList [(a, b) | [a, b] <- map words rawEntries]
-              putStrLn $ "read " ++ show (M.size entries) ++
-                           " entries from disk"
-              return entries)
-          (return M.empty)
+    getMap = ifM (doesFileExist $ accountMapFile conf)
+                 readEntriesFromDisk
+                 (return M.empty)
+
+    readEntriesFromDisk = do
+      rawEntries  <- lines <$> readFile (accountMapFile conf)
+      let entries =  M.fromList [(a, b) | [a, b] <- map words rawEntries]
+      return entries
 
 
 --     --
@@ -89,8 +88,8 @@ runBot = do registerBot
 
 registerBot :: App ()
 registerBot = do nick    <- getBotNick
-                 sendMsg $ IC.nick nick
-                 sendMsg $ IC.user nick "x" "y" nick
+                 sendMsg $  IC.nick nick
+                 sendMsg $  IC.user nick "x" "y" nick
 
 joinChannels :: App ()
 joinChannels = getBotChannels >>= \bc -> forM_ bc (sendMsg . IC.joinChan)
@@ -106,10 +105,9 @@ readMsg = do h <- getBotHandle
              liftIO $ IP.decode <$> hGetLine h
 
 actOnMessage :: IB.Message -> App ()
-actOnMessage m = do whenDebugLog $ "acting on " ++ show m
-                    maybe (return ())
-                          (\h -> h m)
-                          (M.lookup (IB.msg_command m) handlers)
+actOnMessage m = maybe (return ())
+                       (\h -> h m)
+                       (M.lookup (IB.msg_command m) handlers)
 
 handlers :: Map IB.Command MessageHandler
 handlers = M.fromList [("PING",    onPing   )
@@ -133,22 +131,14 @@ onPrivMsg (IB.Message (Just (IB.NickName ircNick _ _)) _ params) =
 onPrivMsg _ = error "unrecognized message format"
 
 sendMsg :: IB.Message -> App ()
-sendMsg m = do h            <- getBotHandle
-               liftIO       $ hPutStrLn h $ IB.encode m
-               whenDebugLog $ "sent " ++ show m
+sendMsg m = do h      <- getBotHandle
+               liftIO $  hPutStrLn h $ IB.encode m
 
 respond :: String -> App ()
 respond msg = do mcr <- getCurRespondent
                  withMaybe mcr
                            (\r -> sendMsg $ IC.privmsg r msg)
                            "no current respondent registered"
-
-setCurRespondent :: String -> String -> App ()
-setCurRespondent nick target =
-  modify $ \s ->
-    s { curRespondent = Just $ if head target == '#'
-                               then target
-                               else nick }
 
 
 --         --
@@ -167,8 +157,8 @@ fmRegister ircNick lastfmName =
 
 addRegistration :: IB.UserName -> LastFMUserName -> App ()
 addRegistration ircNick lastfmName = do
-    sz    <- M.size <$> getNick2LastFMMap
-    if sz > numMaxRegistrations
+    numRegs    <- M.size <$> getAccountMap
+    if numRegs >  maxNumRegistrations
     then
       liftIO $ do printError "too many registrations. chickening out!"
                   exitFailure
@@ -176,15 +166,15 @@ addRegistration ircNick lastfmName = do
       modifyNick2LastFmMap $ \curMap -> M.insert ircNick lastfmName curMap
 
 saveMappingFile :: App ()
-saveMappingFile = do m <- getNick2LastFMMap
-                     f <- getAccountMapFile
+saveMappingFile = do amap           <- getAccountMap
+                     fn             <- getAccountMapFile
                      let serialized = concatMap (\(a, b) -> a++" "++b++"\n")
-                                                (M.toList m)
-                     liftIO $ writeFile f serialized
+                                                (M.toList amap)
+                     liftIO $ writeFile fn serialized
 
 fmLookup :: IB.UserName -> App ()
 fmLookup ircNick =
-  do mLastfmName <- M.lookup ircNick <$> getNick2LastFMMap
+  do mLastfmName <- M.lookup ircNick <$> getAccountMap
      case mLastfmName of
        Nothing ->
          respond $ "no account registered for " ++ ircNick ++ ". " ++
@@ -222,8 +212,8 @@ fmParse body =
   where
     pat = RE.compile "^.*?#text\":\"([^\"]+).*?name\":\"([^\"]+).*$" []
 
-numMaxRegistrations :: Int
-numMaxRegistrations = 4242
+maxNumRegistrations :: Int
+maxNumRegistrations = 4242
 
 isValidFmAccountName :: LastFMUserName -> Bool
 isValidFmAccountName an = an /= "" -- TODO!
@@ -245,14 +235,21 @@ data BotState = BotState { botHandle       :: Handle
                          , curRespondent   :: Maybe IB.UserName
                          }
 getBotHandle             :: App Handle
-getBotHandle             = botHandle      <$> get
+getBotHandle             = botHandle <$> get
 getCurRespondent         :: App (Maybe IB.UserName)
-getCurRespondent         = curRespondent  <$> get
-getNick2LastFMMap        :: App AccountMap
-getNick2LastFMMap        = nick2LastFMMap <$> get
-modifyNick2LastFmMap     :: (AccountMap -> AccountMap) -> App ()
-modifyNick2LastFmMap f   = do m <- getNick2LastFMMap
-                              modify $ \s -> s { nick2LastFMMap = f m }
+getCurRespondent         = curRespondent <$> get
+getAccountMap            :: App AccountMap
+getAccountMap            = nick2LastFMMap <$> get
+
+setCurRespondent :: String -> String -> App ()
+setCurRespondent nick target = modify $ \s ->
+  s { curRespondent = Just $ if head target == '#'
+                             then target
+                             else nick }
+
+modifyNick2LastFmMap :: (AccountMap -> AccountMap) -> App ()
+modifyNick2LastFmMap f = do m      <- getAccountMap
+                            modify $ \s -> s { nick2LastFMMap = f m }
 
 data BotConf = BotConf { botNick        :: IB.UserName
                        , botChannels    :: [ChannelName]
@@ -281,9 +278,6 @@ printError = liftIO . hPutStrLn stderr
 withMaybe :: Maybe a -> (a -> App ()) -> String -> App ()
 withMaybe x a errStr = maybe (printError errStr) a x
 
-whenDebugLog :: String -> App ()
-whenDebugLog _ = return () -- printError
-
 fetchUrl :: MonadIO m => String -> m String
-fetchUrl url = liftIO $
-  simpleHTTP (getRequest url) >>= fmap (take 424242) . getResponseBody
+fetchUrl url = liftIO $ simpleHTTP (getRequest url) >>=
+                          fmap (take 424242) . getResponseBody
